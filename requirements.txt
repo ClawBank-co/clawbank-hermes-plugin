@@ -1,0 +1,2 @@
+# No runtime dependencies — the plugin uses the Python standard library only.
+# Development/test dependencies: pip install pytest ruff

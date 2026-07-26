@@ -1,0 +1,14 @@
+# Tooling configuration only. This repo is a Hermes directory plugin —
+# it is installed by `hermes plugins install`, not by pip.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]

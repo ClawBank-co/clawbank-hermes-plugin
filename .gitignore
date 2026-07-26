@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ClawBank plugin: runtime catalog cache (written next to the plugin at load)
+.catalog.json
+.catalog-*.tmp
+
+# Internal build brief — not part of the public repo
+mission.md

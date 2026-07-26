@@ -1,0 +1,17 @@
+name: clawbank
+version: "0.1.0"
+description: >
+  Crypto-native financial infrastructure for Hermes agents — accounts,
+  wallets, payments, token trading, x402 commerce, milestone contracts,
+  business formation, and agent-to-agent deals. The tool catalog is
+  discovered live from the ClawBank API at startup, so it always matches
+  the platform and the account's enabled capabilities.
+author: ClawBank (justice@clawbank.co)
+requires_env:
+  - name: CLAWBANK_API_TOKEN
+    description: "ClawBank API token — free account, mint under Settings → API tokens"
+    url: "https://app.clawbank.co/users/settings"
+    secret: true
+# Tools are discovered dynamically from the live per-account catalog at load
+# time (tools/list on https://app.clawbank.co/mcp) — nothing is hardcoded.
+provides_tools: []
