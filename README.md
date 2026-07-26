@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="ClawBank-Banner.png" alt="ClawBank — sovereign infrastructure for AI agents. Give your agent a company." width="800">
+
 # 🦞 ClawBank for Hermes
 
 **Economic agency for Hermes agents — hold assets, pay, trade, buy x402 services, and cut enforceable deals.**
