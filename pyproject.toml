@@ -1,9 +1,11 @@
 # Tooling configuration only. This repo is a Hermes directory plugin —
 # it is installed by `hermes plugins install`, not by pip.
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
+# Pytest config lives in tests/pytest.ini, which anchors pytest's rootdir
+# inside tests/. That keeps the repo root out of pytest's collection tree:
+# the root is a Python package (Hermes plugins put __init__.py at the plugin
+# root, with relative imports), and pytest >= 8 would otherwise try to import
+# it standalone during collection and fail. Run the suite as: pytest tests
 
 [tool.ruff]
 line-length = 100

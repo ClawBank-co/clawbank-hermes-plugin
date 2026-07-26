@@ -148,7 +148,7 @@ CLAWBANK_TEST_TOKEN=<token> python scripts/live_check.py   # + loads your real c
 
 ```bash
 pip install pytest ruff
-pytest            # mock MCP endpoint: catalog load, SSE parsing, fallbacks, dispatch
+pytest tests      # mock MCP endpoint: catalog load, SSE parsing, fallbacks, dispatch
 ruff check .      # lint
 python scripts/live_check.py   # optional: verify the live surface shape
 ```
