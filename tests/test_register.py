@@ -52,6 +52,11 @@ class TestFallbacks:
         payload = json.loads(fake_ctx.tools["clawbank_setup"]["handler"]({}))
         assert payload["reason"] == "no_token"
         assert any("register" in step for step in payload["how_to_connect"])
+        assert payload["recommended_token"] == {
+            "name": "hermes-default",
+            "scopes": ["read", "send"],
+            "daily_cap_usd": "10",
+        }
 
     def test_rejected_token_registers_setup_tool(self, plugin, fake_ctx, mock_mcp, tmp_path, monkeypatch):
         _wire_env(monkeypatch, plugin, tmp_path, mock_mcp.url, token="revoked-token")
@@ -69,6 +74,20 @@ class TestFallbacks:
         plugin.register(fake_ctx)
 
         assert set(fake_ctx.tools) == {t["name"] for t in SAMPLE_TOOLS}
+
+    def test_offline_cached_annotations_cannot_authorize_calls(
+        self, plugin, fake_ctx, client_mod, unreachable_url, tmp_path, monkeypatch
+    ):
+        cache = tmp_path / "catalog.json"
+        identity = client_mod.catalog_cache_identity(unreachable_url, TEST_TOKEN)
+        client_mod.save_catalog(cache, SAMPLE_TOOLS, identity)
+        _wire_env(monkeypatch, plugin, tmp_path, unreachable_url)
+        plugin.register(fake_ctx)
+
+        payload = json.loads(fake_ctx.tools["get_balance"]["handler"]({}))
+
+        assert payload["error"] == "destructive_tool_blocked"
+        assert "cached catalog" in payload["hint"]
 
     def test_offline_start_ignores_cache_from_other_token(self, plugin, fake_ctx, client_mod, unreachable_url, tmp_path, monkeypatch):
         """A cache written under one token identity is never served to
@@ -106,6 +125,44 @@ class TestFallbacks:
 
 
 class TestDispatch:
+    def test_destructive_annotation_blocks_call_by_default(
+        self, plugin, fake_ctx, mock_mcp, tmp_path, monkeypatch
+    ):
+        mock_mcp.state.tools[1] = {
+            **mock_mcp.state.tools[1],
+            "annotations": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": False,
+            },
+        }
+        _wire_env(monkeypatch, plugin, tmp_path, mock_mcp.url)
+        monkeypatch.delenv("CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS", raising=False)
+        plugin.register(fake_ctx)
+
+        payload = json.loads(
+            fake_ctx.tools["send_usdc_on_base"]["handler"](
+                {"to_address": "0xdef", "amount": "1"}
+            )
+        )
+
+        assert payload["error"] == "destructive_tool_blocked"
+        assert mock_mcp.state.calls == []
+
+    def test_explicit_opt_in_allows_destructive_call(
+        self, plugin, fake_ctx, mock_mcp, tmp_path, monkeypatch
+    ):
+        _wire_env(monkeypatch, plugin, tmp_path, mock_mcp.url)
+        monkeypatch.setenv("CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS", "1")
+        plugin.register(fake_ctx)
+
+        output = fake_ctx.tools["send_usdc_on_base"]["handler"](
+            {"to_address": "0xdef", "amount": "1"}
+        )
+
+        assert json.loads(output) == {"balance_usdc": "12.34"}
+        assert mock_mcp.state.calls[-1]["name"] == "send_usdc_on_base"
+
     def test_handler_forwards_to_tools_call(self, plugin, fake_ctx, mock_mcp, tmp_path, monkeypatch):
         _wire_env(monkeypatch, plugin, tmp_path, mock_mcp.url)
         plugin.register(fake_ctx)
@@ -118,6 +175,7 @@ class TestDispatch:
 
     def test_handler_passes_arguments_through(self, plugin, fake_ctx, mock_mcp, tmp_path, monkeypatch):
         _wire_env(monkeypatch, plugin, tmp_path, mock_mcp.url)
+        monkeypatch.setenv("CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS", "1")
         plugin.register(fake_ctx)
 
         fake_ctx.tools["send_usdc_on_base"]["handler"]({"to_address": "0xdef", "amount": "1"})
@@ -142,6 +200,18 @@ class TestDispatch:
 
 
 class TestSchemaShaping:
+    def test_missing_or_malformed_annotations_fail_closed(self, plugin):
+        assert plugin._is_destructive({"name": "unclassified"}) is True
+        assert plugin._is_destructive(
+            {
+                "name": "malformed",
+                "annotations": {
+                    "readOnlyHint": "true",
+                    "destructiveHint": False,
+                },
+            }
+        ) is True
+
     def test_short_description_truncates_first_line(self, plugin):
         long = "x" * 200 + "\nsecond line"
         short = plugin._short_description(long)

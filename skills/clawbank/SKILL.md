@@ -136,9 +136,14 @@ token, wrong destination, wrong network, still pending) without escalation.
 
 ## Known limits (be candid about them)
 
-- Tokens have no scopes or spending caps; the account-level x402 budget is
-  the only server-side spend limit. The confirmation contract above is the
-  compensating control.
+- API tokens are scope-aware (`read`, `send`, `trade`, `admin`, `raw_sign`) and
+  can carry server-enforced per-transaction and daily USD caps. Use separate,
+  least-privilege keys for monitoring, normal operation, and raw signing.
+- The plugin blocks every handler not explicitly classified read-only by a
+  fresh MCP catalog, including destructive, unclassified, and cached tools,
+  unless `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS=1` was set before Hermes started.
+  Enabling that flag does not replace the per-action confirmation contract
+  above; it only arms those registered handlers.
 - There is no sandbox mode. Suggest small test amounts for first-time flows.
 - New server-side tools appear at the next Hermes restart, not mid-session.
 

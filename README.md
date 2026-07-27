@@ -27,12 +27,25 @@ This plugin connects all of it to [Hermes](https://github.com/NousResearch/herme
 hermes plugins install ClawBank-co/clawbank-hermes-plugin --enable
 ```
 
-That's the whole thing — Hermes installs plugins straight from GitHub into `~/.hermes/plugins/`. There is no registry, approval step, or waiting period.
+That's the whole thing — Hermes installs plugins straight from GitHub into `~/.hermes/plugins/`. There is no registry, approval step, or waiting period. Requires **Hermes v0.19.0 or newer** (CI loads the plugin against this exact minimum on every push).
 
 Hermes prompts for your `CLAWBANK_API_TOKEN` during install (input is masked; the value is saved to the active Hermes profile's env file — `$HERMES_HOME/.env`, which is `~/.hermes/.env` by default — not a project-local `.env`):
 
 1. Create a free account at [app.clawbank.co/users/register](https://app.clawbank.co/users/register)
 2. Mint a token under **Settings → API tokens** ([app.clawbank.co/users/settings](https://app.clawbank.co/users/settings))
+
+For headless setup, use the documented three-step email bootstrap flow at
+[app.clawbank.co/docs](https://app.clawbank.co/docs). The recommended default
+mint body is:
+
+```json
+{"name":"hermes-default","scopes":["read","send"],"daily_cap_usd":"10"}
+```
+
+The plugin recommends this bounded default rather than silently creating a
+full-access key. An unscoped key remains available when a user intentionally
+wants the complete surface for a fresh account. Use separate purpose-specific
+keys for monitoring and raw-signing automation.
 
 ## Verify the install
 
@@ -55,7 +68,7 @@ Good to know:
 
 - **New tools appear on restart, not mid-session.** The catalog is fetched once per Hermes launch. When ClawBank ships new capabilities, restart Hermes to pick them up — no plugin update needed.
 - **Token rotation.** If you revoke/rotate your token, update `CLAWBANK_API_TOKEN` in the environment (or `$HERMES_HOME/.env`) and restart. Mid-session, a revoked token doesn't crash anything — tool calls return a clear error with re-mint instructions.
-- **Offline starts are fine.** The last successful catalog is cached next to the plugin (`.catalog.json`), so a flaky network at startup still registers the full toolset.
+- **Offline starts degrade safely.** The last successful catalog is cached next to the plugin (`.catalog.json`, bound to your endpoint + token, 7-day TTL), so a flaky network at startup still registers the toolset. Cached annotations can't *authorize* execution, though: tools registered from cache return a clear "blocked" error until a fresh catalog loads (or `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS=1` is deliberately set).
 
 ## What your agent can do
 
@@ -72,7 +85,8 @@ Good to know:
 | **Coms** | Agent-to-agent email and IM, plus MoltBook registration |
 | **Fight Clubs** | DAO membership, proposals, voting, and treasury actions |
 
-The catalog is **per-account**: `tools/list` returns exactly what your token's account can call, so gated capabilities never clutter your agent's context.
+The catalog is **per-token and scope-aware**: `tools/list` returns exactly what
+that key can call. A `read` key sees no fund-moving tools at all.
 
 ## How it works
 
@@ -107,15 +121,16 @@ A bundled skill (`skills/clawbank/`) teaches the agent judgment: when to quote i
 | --- | --- | --- |
 | `CLAWBANK_API_TOKEN` | API token (prompted at install) | — |
 | `CLAWBANK_TOKEN` | Token fallback, for parity with the ClawBank CLI | — |
-| `CLAWBANK_MCP_URL` | MCP endpoint override — must be `https://` (plain `http://` is allowed only for `localhost`/literal loopback IPs). **Any override receives your full-access token**; point it only at endpoints you control. A warning is logged when a non-default endpoint is in use. | `https://app.clawbank.co/mcp` |
+| `CLAWBANK_MCP_URL` | MCP endpoint override — must be `https://` (plain `http://` is allowed only for `localhost`/literal loopback IPs). **Any override receives your API token**; point it only at endpoints you control. A warning is logged when a non-default endpoint is in use. | `https://app.clawbank.co/mcp` |
 | `CLAWBANK_ALLOW_INSECURE_URL` | Development-only: set to `1` to allow a non-local `http://` endpoint. Never use with a real token. | unset |
+| `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS` | Set to `1` to arm every handler not explicitly classified read-only by a fresh catalog, including destructive, unclassified, and cached tools. | unset |
 
 ## Safety model
 
-- **Server-side first.** Fund-moving tools carry their safety language in their own descriptions (e.g. *"MOVES FUNDS OUT — always confirm the token, amount, and destination with the user first"*). Strengthening them server-side upgrades every client at once.
+- **Server-side first.** Every tool carries standard MCP annotations from the same server-side scope table that gates `tools/call`. The plugin fails closed unless a tool is explicitly annotated read-only; destructive tools are blocked unless `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS=1` was set before Hermes starts.
 - **The skill is the judgment layer.** It enforces a confirmation contract for anything that moves value — restate asset, amount, destination, and network, then wait for an explicit yes — plus invariants like *never infer a wallet address* and *blockchain finality is real*. The full confirmation matrix is inlined in [`skills/clawbank/SKILL.md`](skills/clawbank/SKILL.md), so it is always available in-session via `skill_view`.
 - **Transport hardening.** The MCP endpoint must be HTTPS (loopback excepted for development), and HTTP redirects are refused outright — the bearer token is never forwarded to a redirect target. A rejected `CLAWBANK_MCP_URL` degrades to the `clawbank_setup` tool rather than sending credentials anywhere.
-- **Tokens are full-access.** ClawBank API tokens have no scopes; treat them like a bank password. They are revocable at any time under Settings → API tokens.
+- **Tokens are scoped and spend-capped.** Prefer `read` for monitoring and `read` + `send` with a low daily cap for normal use. Add `trade`/`admin` only when required; keep `raw_sign` on a separate purpose-specific key. Server-side per-transaction and daily caps remain enforced even when destructive tools are enabled locally.
 
 ## Troubleshooting
 
@@ -156,6 +171,12 @@ pip install pytest ruff
 pytest tests      # mock MCP endpoint: catalog load, SSE parsing, fallbacks, dispatch
 ruff check .      # lint
 python scripts/live_check.py   # optional: verify the live surface shape
+
+# Real-Hermes integration tests (skipped automatically when hermes-agent is
+# absent): install the plugin into an isolated HERMES_HOME and drive Hermes's
+# own discovery, loading, registry, and dispatch in a fresh process.
+pip install "hermes-agent>=0.19.0"
+pytest tests/test_hermes_integration.py -v
 ```
 
 ```

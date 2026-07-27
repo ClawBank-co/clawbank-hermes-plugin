@@ -38,6 +38,22 @@ live from the ClawBank API and change server-side without plugin releases.
   per-area confirmation matrix, failure patterns, and known limits are
   inlined in `SKILL.md` so they load through `skill_view` even where Hermes
   does not serve a skill's supporting files.
+- Deterministic destructive-tool gate: every tool's standard MCP annotations
+  (served from the same server-side scope table that gates `tools/call`) are
+  checked at dispatch. The plugin fails closed — a tool must be explicitly
+  annotated read-only to execute; destructive or unclassified tools return a
+  clear `destructive_tool_blocked` error unless
+  `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS=1` was deliberately set before launch.
+  Annotations from a *cached* catalog never authorize execution while the
+  live catalog is unavailable.
+- Scoped, spend-capped tokens are the recommended default (`read` + `send`,
+  $10/day). The setup tool, README, and setup reference document the scoped
+  mint body; unscoped full-access keys remain available but are never the
+  silent default.
+- Aggregate catalog metadata is byte-capped across pagination (8 MiB) in
+  both live fetches and `sanitize_tools`, and oversized cache files are
+  rejected by size before being read into memory.
+- GitHub Actions are pinned to commit SHAs in CI.
 
 ### Added
 
@@ -54,6 +70,13 @@ live from the ClawBank API and change server-side without plugin releases.
   and catalog pagination support — standard library only, zero dependencies.
 - Mock-endpoint test suite and CI (Python 3.10–3.13 on Linux, macOS, and
   Windows), plus a scheduled live-surface drift check.
+- Real-Hermes integration tests: a dedicated CI job installs the actual
+  `hermes-agent` release (declared minimum: 0.19.0), installs the plugin
+  into an isolated `HERMES_HOME`, and drives Hermes's own plugin discovery,
+  loading, tool registry, and dispatch in a fresh process — covering the
+  no-token fallback, the authenticated catalog, schema fidelity, the
+  rejected-token degradation, and in-session availability of the
+  safety-critical skill content.
 - Headless bootstrap payloads (`request_code`, `verify_code`,
   `bootstrap/api_tokens`) documented with exact request bodies in the
   `clawbank_setup` tool output and the setup reference.

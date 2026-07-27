@@ -44,6 +44,8 @@ MAX_CATALOG_TOOLS = 512
 MAX_TOOL_NAME_LENGTH = 200
 MAX_CURSOR_LENGTH = 4096
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # 8 MiB per HTTP response body
+MAX_CATALOG_BYTES = 8 * 1024 * 1024  # 8 MiB across all paginated tool metadata
+MAX_CACHE_FILE_BYTES = MAX_CATALOG_BYTES + 64 * 1024  # catalog plus cache envelope
 
 # Cached catalogs are a fallback for flaky starts, not a source of truth:
 # they expire, and they are bound to the endpoint + token identity that
@@ -296,6 +298,7 @@ class ClawbankClient:
         """
         self.initialize()
         tools: list = []
+        catalog_bytes = 0
         cursor = None
         seen_cursors: set = set()
         for _ in range(MAX_CATALOG_PAGES):
@@ -308,6 +311,13 @@ class ClawbankClient:
             page = result.get("tools") or []
             if not isinstance(page, list):
                 raise ClawbankError("tools/list 'tools' field is not a list")
+            catalog_bytes += len(
+                json.dumps(page, separators=(",", ":")).encode("utf-8")
+            )
+            if catalog_bytes > MAX_CATALOG_BYTES:
+                raise ClawbankError(
+                    f"catalog metadata exceeded {MAX_CATALOG_BYTES} bytes; refusing it"
+                )
             tools.extend(page)
             if len(tools) > MAX_CATALOG_TOOLS:
                 raise ClawbankError(
@@ -352,6 +362,16 @@ def sanitize_tools(raw: Any) -> list:
         raise ClawbankError("tool catalog is not a list")
     if len(raw) > MAX_CATALOG_TOOLS:
         raise ClawbankError(f"catalog exceeded {MAX_CATALOG_TOOLS} tools; refusing it")
+    try:
+        catalog_bytes = len(
+            json.dumps(raw, separators=(",", ":")).encode("utf-8")
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ClawbankError("tool catalog metadata is not JSON-serializable") from exc
+    if catalog_bytes > MAX_CATALOG_BYTES:
+        raise ClawbankError(
+            f"catalog metadata exceeded {MAX_CATALOG_BYTES} bytes; refusing it"
+        )
     tools: list = []
     seen_names: set = set()
     for tool in raw:
@@ -439,7 +459,10 @@ def load_cached_catalog(path: Path, identity: str) -> list:
     catalog).
     """
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        cache_path = Path(path)
+        if cache_path.stat().st_size > MAX_CACHE_FILE_BYTES:
+            return []
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, dict) or data.get("identity") != identity:
@@ -470,7 +493,7 @@ def save_catalog(path: Path, tools: list, identity: str) -> None:
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".catalog-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
+                json.dump(payload, handle, separators=(",", ":"))
             os.replace(tmp_name, path)
         except BaseException:
             try:
