@@ -493,7 +493,7 @@ def save_catalog(path: Path, tools: list, identity: str) -> None:
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".catalog-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
+                json.dump(payload, handle, separators=(",", ":"))
             os.replace(tmp_name, path)
         except BaseException:
             try:

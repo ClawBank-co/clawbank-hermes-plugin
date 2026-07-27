@@ -58,7 +58,7 @@ Optional overrides (matching the ClawBank CLI's conventions):
 | `CLAWBANK_API_TOKEN` | API token (primary) | — |
 | `CLAWBANK_TOKEN` | API token (fallback, CLI compatibility) | — |
 | `CLAWBANK_MCP_URL` | MCP endpoint override | `https://app.clawbank.co/mcp` |
-| `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS` | Set to `1` to enable tools carrying MCP `destructiveHint: true`; keep unset for read-only operation | unset |
+| `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS` | Set to `1` to arm handlers not explicitly classified read-only by a fresh catalog, including destructive, unclassified, and cached tools | unset |
 
 ## 4. Verify
 

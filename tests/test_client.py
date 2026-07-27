@@ -318,6 +318,7 @@ class TestCatalogCache:
         path = tmp_path / "catalog.json"
         client_mod.save_catalog(path, SAMPLE_TOOLS, self.IDENTITY)
         assert client_mod.load_cached_catalog(path, self.IDENTITY) == SAMPLE_TOOLS
+        assert '": "' not in path.read_text()
 
     def test_wrong_identity_returns_empty(self, client_mod, tmp_path):
         path = tmp_path / "catalog.json"

@@ -123,7 +123,7 @@ A bundled skill (`skills/clawbank/`) teaches the agent judgment: when to quote i
 | `CLAWBANK_TOKEN` | Token fallback, for parity with the ClawBank CLI | — |
 | `CLAWBANK_MCP_URL` | MCP endpoint override — must be `https://` (plain `http://` is allowed only for `localhost`/literal loopback IPs). **Any override receives your API token**; point it only at endpoints you control. A warning is logged when a non-default endpoint is in use. | `https://app.clawbank.co/mcp` |
 | `CLAWBANK_ALLOW_INSECURE_URL` | Development-only: set to `1` to allow a non-local `http://` endpoint. Never use with a real token. | unset |
-| `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS` | Set to `1` to enable tools marked `destructiveHint: true`. Leave unset for deterministic read-only execution. | unset |
+| `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS` | Set to `1` to arm every handler not explicitly classified read-only by a fresh catalog, including destructive, unclassified, and cached tools. | unset |
 
 ## Safety model
 
