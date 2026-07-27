@@ -49,6 +49,63 @@ class TestToolsList:
             _client(client_mod, mock_mcp.url).tools_list()
 
 
+class TestCatalogValidation:
+    """Malformed or oversized server responses become ClawbankError (which
+    register() turns into the cache/setup fallback) — never a crash."""
+
+    def test_non_dict_result_raises(self, client_mod, mock_mcp):
+        mock_mcp.state.list_result_override = ["not", "an", "object"]
+        with pytest.raises(client_mod.ClawbankError, match="non-object"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+    def test_tools_not_a_list_raises(self, client_mod, mock_mcp):
+        mock_mcp.state.list_result_override = {"tools": "not-a-list"}
+        with pytest.raises(client_mod.ClawbankError, match="not a list"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+    def test_non_string_cursor_raises(self, client_mod, mock_mcp):
+        mock_mcp.state.list_result_override = {"tools": [], "nextCursor": {"evil": 1}}
+        with pytest.raises(client_mod.ClawbankError, match="invalid pagination cursor"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+    def test_too_many_tools_raises(self, client_mod, mock_mcp):
+        flood = [{"name": f"tool_{i}", "inputSchema": {}} for i in range(client_mod.MAX_CATALOG_TOOLS + 1)]
+        mock_mcp.state.list_result_override = {"tools": flood}
+        with pytest.raises(client_mod.ClawbankError, match="exceeded"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+    def test_oversized_response_body_raises(self, client_mod, mock_mcp, monkeypatch):
+        monkeypatch.setattr(client_mod, "MAX_RESPONSE_BYTES", 1024)
+        mock_mcp.state.list_result_override = {"tools": [{"name": "x" * 2048}]}
+        with pytest.raises(client_mod.ClawbankError, match="exceeded"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+    def test_malformed_descriptors_dropped_and_duplicates_deduped(self, client_mod):
+        raw = [
+            {"name": "good", "description": "ok", "inputSchema": {"type": "object"}},
+            {"name": "good", "description": "duplicate must not shadow the first"},
+            "not-a-dict",
+            {"description": "no name"},
+            {"name": ""},
+            {"name": 42},
+            {"name": "x" * (client_mod.MAX_TOOL_NAME_LENGTH + 1)},
+            {"name": "odd_shapes", "description": 7, "inputSchema": "nope"},
+        ]
+        clean = client_mod.sanitize_tools(raw)
+        assert [t["name"] for t in clean] == ["good", "odd_shapes"]
+        assert clean[0]["description"] == "ok"
+        assert clean[1]["description"] == ""
+        assert clean[1]["inputSchema"] == {"type": "object", "properties": {}}
+
+    def test_sanitize_preserves_annotations(self, client_mod):
+        raw = [{"name": "t", "annotations": {"readOnlyHint": True}}]
+        assert client_mod.sanitize_tools(raw)[0]["annotations"] == {"readOnlyHint": True}
+
+    def test_sanitize_rejects_non_list(self, client_mod):
+        with pytest.raises(client_mod.ClawbankError):
+            client_mod.sanitize_tools({"tools": []})
+
+
 class TestUrlValidation:
     """CBH-001: the endpoint must never be able to receive the token over
     cleartext HTTP (loopback excepted for development and tests)."""
@@ -58,13 +115,44 @@ class TestUrlValidation:
         assert client.mcp_url == "https://app.clawbank.co/mcp"
 
     def test_http_loopback_allowed(self, client_mod):
-        for host in ("localhost", "127.0.0.1", "127.9.9.9"):
+        for host in ("localhost", "127.0.0.1", "127.9.9.9", "[::1]"):
             client_mod.ClawbankClient(mcp_url=f"http://{host}:8080/mcp")
 
     def test_http_public_host_rejected(self, client_mod, monkeypatch):
         monkeypatch.delenv("CLAWBANK_ALLOW_INSECURE_URL", raising=False)
         with pytest.raises(client_mod.ClawbankError, match="insecure"):
             client_mod.ClawbankClient(mcp_url="http://evil.example.com/mcp")
+
+    def test_dns_names_that_look_like_loopback_rejected(self, client_mod, monkeypatch):
+        """A hostname is loopback only if it *parses as* a loopback IP — DNS
+        names dressed up as one (127.evil.example) must be rejected."""
+        monkeypatch.delenv("CLAWBANK_ALLOW_INSECURE_URL", raising=False)
+        for host in (
+            "127.evil.example",
+            "127.attacker.com",
+            "localhost.evil.example",
+            "127.0.0.1.nip.io",
+        ):
+            with pytest.raises(client_mod.ClawbankError, match="insecure"):
+                client_mod.ClawbankClient(mcp_url=f"http://{host}/mcp")
+
+    def test_alternate_ipv4_representations_rejected(self, client_mod, monkeypatch):
+        """Decimal/hex/zero-padded IPv4 forms don't parse as literal IPs —
+        they must fail closed, not be resolved leniently."""
+        monkeypatch.delenv("CLAWBANK_ALLOW_INSECURE_URL", raising=False)
+        for host in ("2130706433", "0x7f000001", "017700000001", "127.1"):
+            with pytest.raises(client_mod.ClawbankError):
+                client_mod.ClawbankClient(mcp_url=f"http://{host}/mcp")
+
+    def test_non_loopback_ipv6_rejected(self, client_mod, monkeypatch):
+        monkeypatch.delenv("CLAWBANK_ALLOW_INSECURE_URL", raising=False)
+        with pytest.raises(client_mod.ClawbankError, match="insecure"):
+            client_mod.ClawbankClient(mcp_url="http://[2001:db8::1]/mcp")
+
+    def test_https_requires_host(self, client_mod):
+        for url in ("https:///mcp", "https://"):
+            with pytest.raises(client_mod.ClawbankError, match="missing host"):
+                client_mod.ClawbankClient(mcp_url=url)
 
     def test_non_http_scheme_rejected(self, client_mod):
         for url in ("ftp://app.clawbank.co/mcp", "file:///etc/passwd", "not a url"):
@@ -170,15 +258,58 @@ class TestResultToText:
 
 
 class TestCatalogCache:
+    IDENTITY = "https://app.clawbank.co/mcp#0123456789ab"
+
+    def _write(self, path, **overrides):
+        from datetime import datetime, timezone
+
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "identity": self.IDENTITY,
+            "tools": SAMPLE_TOOLS,
+        }
+        payload.update(overrides)
+        path.write_text(json.dumps(payload))
+
     def test_roundtrip(self, client_mod, tmp_path):
         path = tmp_path / "catalog.json"
-        client_mod.save_catalog(path, SAMPLE_TOOLS)
-        assert client_mod.load_cached_catalog(path) == SAMPLE_TOOLS
+        client_mod.save_catalog(path, SAMPLE_TOOLS, self.IDENTITY)
+        assert client_mod.load_cached_catalog(path, self.IDENTITY) == SAMPLE_TOOLS
+
+    def test_wrong_identity_returns_empty(self, client_mod, tmp_path):
+        path = tmp_path / "catalog.json"
+        client_mod.save_catalog(path, SAMPLE_TOOLS, self.IDENTITY)
+        assert client_mod.load_cached_catalog(path, "https://other/mcp#fingerprint") == []
+
+    def test_expired_cache_returns_empty(self, client_mod, tmp_path):
+        path = tmp_path / "catalog.json"
+        self._write(path, saved_at="2000-01-01T00:00:00+00:00")
+        assert client_mod.load_cached_catalog(path, self.IDENTITY) == []
+
+    def test_missing_or_naive_timestamp_returns_empty(self, client_mod, tmp_path):
+        path = tmp_path / "catalog.json"
+        self._write(path, saved_at=None)
+        assert client_mod.load_cached_catalog(path, self.IDENTITY) == []
+        self._write(path, saved_at="2026-07-27T00:00:00")  # no timezone
+        assert client_mod.load_cached_catalog(path, self.IDENTITY) == []
+
+    def test_malformed_tools_returns_empty(self, client_mod, tmp_path):
+        path = tmp_path / "catalog.json"
+        self._write(path, tools="not-a-list")
+        assert client_mod.load_cached_catalog(path, self.IDENTITY) == []
 
     def test_missing_file_returns_empty(self, client_mod, tmp_path):
-        assert client_mod.load_cached_catalog(tmp_path / "nope.json") == []
+        assert client_mod.load_cached_catalog(tmp_path / "nope.json", self.IDENTITY) == []
 
     def test_corrupt_file_returns_empty(self, client_mod, tmp_path):
         path = tmp_path / "catalog.json"
         path.write_text("{not json")
-        assert client_mod.load_cached_catalog(path) == []
+        assert client_mod.load_cached_catalog(path, self.IDENTITY) == []
+
+    def test_identity_binds_endpoint_and_token_without_leaking_it(self, client_mod):
+        url = "https://app.clawbank.co/mcp"
+        a = client_mod.catalog_cache_identity(url, "token-one")
+        b = client_mod.catalog_cache_identity(url, "token-two")
+        c = client_mod.catalog_cache_identity("https://staging.example/mcp", "token-one")
+        assert len({a, b, c}) == 3
+        assert "token-one" not in a and "token-one" not in c

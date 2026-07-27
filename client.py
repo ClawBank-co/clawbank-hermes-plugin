@@ -15,13 +15,15 @@ Standard library only — no third-party dependencies.
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import os
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +35,20 @@ CLIENT_INFO = {"name": "clawbank-hermes-plugin", "version": PLUGIN_VERSION}
 
 _ACCEPT = "application/json, text/event-stream"
 
-# Catalog pagination guards: a well-behaved server returns the full catalog in
-# a handful of pages. These caps turn a malicious or broken server into a
-# clean startup error (which falls back to the cache) instead of a hang.
+# Resource bounds: a well-behaved server never approaches these. They turn a
+# malicious or broken server into a clean startup error (which falls back to
+# the cache or the setup tool) instead of a hang, memory blow-up, or a
+# poisoned registration pass.
 MAX_CATALOG_PAGES = 50
+MAX_CATALOG_TOOLS = 512
+MAX_TOOL_NAME_LENGTH = 200
+MAX_CURSOR_LENGTH = 4096
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # 8 MiB per HTTP response body
+
+# Cached catalogs are a fallback for flaky starts, not a source of truth:
+# they expire, and they are bound to the endpoint + token identity that
+# produced them so one account's catalog is never served to another.
+CACHE_TTL = timedelta(days=7)
 
 
 class ClawbankError(Exception):
@@ -64,7 +76,21 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
 
 _OPENER = urllib.request.build_opener(_RefuseRedirects())
 
-_LOOPBACK_HOSTS = {"localhost", "::1"}
+
+def _is_loopback_host(host: str) -> bool:
+    """True only for ``localhost`` or a *literal* loopback IP address.
+
+    The host must parse as an IP address — a DNS name is never loopback, no
+    matter what it looks like. (A prefix check like ``startswith("127.")``
+    would accept attacker-controlled public names such as
+    ``127.evil.example``.)
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def validate_mcp_url(url: str) -> str:
@@ -72,21 +98,27 @@ def validate_mcp_url(url: str) -> str:
 
     Rules:
 
-    * ``https://`` — always allowed.
-    * ``http://``  — allowed only for loopback hosts (local development and
-      tests), or when ``CLAWBANK_ALLOW_INSECURE_URL=1`` is explicitly set.
-      That flag is a development escape hatch; never use it with a real token.
+    * ``https://`` — allowed (must have a host).
+    * ``http://``  — allowed only for ``localhost`` / literal loopback IPs
+      (local development and tests), or when ``CLAWBANK_ALLOW_INSECURE_URL=1``
+      is explicitly set. That flag is a development escape hatch; never use
+      it with a real token.
     * anything else — rejected.
 
     Raises ``ClawbankError`` on rejection.
     """
     url = (url or "").strip()
-    parts = urllib.parse.urlsplit(url)
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError as exc:
+        raise ClawbankError(f"invalid MCP URL {url!r}: {exc}") from exc
     if parts.scheme == "https":
+        if not host:
+            raise ClawbankError(f"invalid MCP URL {url!r}: missing host")
         return url
     if parts.scheme == "http":
-        host = (parts.hostname or "").lower()
-        if host in _LOOPBACK_HOSTS or host.startswith("127."):
+        if _is_loopback_host(host):
             return url
         if os.environ.get("CLAWBANK_ALLOW_INSECURE_URL", "").strip() == "1":
             return url
@@ -171,7 +203,13 @@ class ClawbankClient:
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
                     self._session_id = session_id
-                body = response.read().decode("utf-8", errors="replace")
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ClawbankError(
+                        f"response from {self.mcp_url} exceeded "
+                        f"{MAX_RESPONSE_BYTES} bytes; refusing to parse it"
+                    )
+                body = raw.decode("utf-8", errors="replace")
                 content_type = response.headers.get("Content-Type", "")
                 return body, content_type
         except urllib.error.HTTPError as exc:
@@ -182,7 +220,7 @@ class ClawbankClient:
                     + (f" to {location}" if location else "")
                     + " — credentials are never forwarded across redirects"
                 ) from exc
-            body = exc.read().decode("utf-8", errors="replace")
+            body = exc.read(65536).decode("utf-8", errors="replace")
             if exc.code in (401, 403):
                 raise AuthError(_error_detail(body) or f"HTTP {exc.code}") from exc
             raise ClawbankError(
@@ -251,9 +289,10 @@ class ClawbankClient:
     def tools_list(self) -> list:
         """Fetch the full per-account tool catalog (follows pagination).
 
-        Bounded: a repeated cursor or more than ``MAX_CATALOG_PAGES`` pages is
-        treated as a broken/hostile server and raises ``ClawbankError`` (the
-        caller then falls back to the cached catalog or the setup tool).
+        Bounded and validated: malformed result shapes, repeated cursors,
+        oversized catalogs, and runaway pagination all raise ``ClawbankError``
+        (the caller then falls back to the cached catalog or the setup tool)
+        instead of crashing registration or hanging.
         """
         self.initialize()
         tools: list = []
@@ -261,11 +300,24 @@ class ClawbankClient:
         seen_cursors: set = set()
         for _ in range(MAX_CATALOG_PAGES):
             params = {"cursor": cursor} if cursor else {}
-            result = self._rpc("tools/list", params) or {}
-            tools.extend(result.get("tools") or [])
+            result = self._rpc("tools/list", params)
+            if result is None:
+                result = {}
+            if not isinstance(result, dict):
+                raise ClawbankError("tools/list returned a non-object result")
+            page = result.get("tools") or []
+            if not isinstance(page, list):
+                raise ClawbankError("tools/list 'tools' field is not a list")
+            tools.extend(page)
+            if len(tools) > MAX_CATALOG_TOOLS:
+                raise ClawbankError(
+                    f"catalog exceeded {MAX_CATALOG_TOOLS} tools; refusing it"
+                )
             cursor = result.get("nextCursor")
             if not cursor:
-                return tools
+                return sanitize_tools(tools)
+            if not isinstance(cursor, str) or len(cursor) > MAX_CURSOR_LENGTH:
+                raise ClawbankError("tools/list returned an invalid pagination cursor")
             if cursor in seen_cursors:
                 raise ClawbankError("tools/list pagination cursor cycle detected")
             seen_cursors.add(cursor)
@@ -278,6 +330,56 @@ class ClawbankClient:
         self.initialize()
         result = self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
         return result if isinstance(result, dict) else {"content": [], "raw": result}
+
+
+def sanitize_tools(raw: Any) -> list:
+    """Reduce a raw tool catalog to well-formed, deduplicated descriptors.
+
+    Runs on every catalog before it is registered or cached — fetched *or*
+    loaded from disk. Structural garbage (not a list, oversized) raises
+    ``ClawbankError``; individually malformed descriptors are dropped rather
+    than poisoning registration. Only known keys survive, with the shapes
+    downstream code assumes:
+
+    * ``name`` — required non-empty string, capped length, first occurrence
+      wins (a duplicate can never shadow an earlier tool's handler)
+    * ``description`` — string, else ``""``
+    * ``inputSchema`` — dict, else an empty object schema
+    * ``annotations`` — dict, preserved for risk metadata (``readOnlyHint``,
+      ``destructiveHint``) if/when the server ships it
+    """
+    if not isinstance(raw, list):
+        raise ClawbankError("tool catalog is not a list")
+    if len(raw) > MAX_CATALOG_TOOLS:
+        raise ClawbankError(f"catalog exceeded {MAX_CATALOG_TOOLS} tools; refusing it")
+    tools: list = []
+    seen_names: set = set()
+    for tool in raw:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > MAX_TOOL_NAME_LENGTH
+            or name in seen_names
+        ):
+            continue
+        description = tool.get("description")
+        schema = tool.get("inputSchema")
+        clean = {
+            "name": name,
+            "description": description if isinstance(description, str) else "",
+            "inputSchema": schema
+            if isinstance(schema, dict)
+            else {"type": "object", "properties": {}},
+        }
+        annotations = tool.get("annotations")
+        if isinstance(annotations, dict):
+            clean["annotations"] = annotations
+        seen_names.add(name)
+        tools.append(clean)
+    return tools
 
 
 def result_to_text(result: Any) -> str:
@@ -312,22 +414,54 @@ def result_to_text(result: Any) -> str:
 #
 # ``tools/list`` runs once per Hermes launch. We keep the last successful
 # catalog on disk so a flaky network or brief outage at startup still yields
-# a working toolset. New server-side tools appear on the next successful
-# launch — the same freshness model as every other MCP client.
+# a working toolset. The cache is strictly a fallback: it expires after
+# ``CACHE_TTL``, is bound to the (endpoint, token) identity that produced it,
+# and is re-validated with ``sanitize_tools`` before use.
 
 
-def load_cached_catalog(path: Path) -> list:
+def catalog_cache_identity(mcp_url: str, token: str | None) -> str:
+    """Non-secret identity a cache entry is bound to.
+
+    Endpoint plus a short token fingerprint (a SHA-256 prefix — not
+    reversible, never the token itself). Rotating the token, switching
+    accounts, or pointing at a different endpoint all invalidate the cache.
+    """
+    fingerprint = hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:12]
+    return f"{mcp_url}#{fingerprint}"
+
+
+def load_cached_catalog(path: Path, identity: str) -> list:
+    """Load a cached catalog if it matches ``identity`` and is fresh.
+
+    Anything unexpected — unreadable file, wrong identity, missing or
+    unparseable ``saved_at``, expired TTL, malformed tools — returns ``[]``
+    (fail closed to the setup tool; never register a stale or foreign
+    catalog).
+    """
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    tools = data.get("tools") if isinstance(data, dict) else None
-    return tools if isinstance(tools, list) else []
+    if not isinstance(data, dict) or data.get("identity") != identity:
+        return []
+    try:
+        saved_at = datetime.fromisoformat(data.get("saved_at") or "")
+    except (TypeError, ValueError):
+        return []
+    if saved_at.tzinfo is None:
+        return []
+    if datetime.now(timezone.utc) - saved_at > CACHE_TTL:
+        return []
+    try:
+        return sanitize_tools(data.get("tools"))
+    except ClawbankError:
+        return []
 
 
-def save_catalog(path: Path, tools: list) -> None:
+def save_catalog(path: Path, tools: list, identity: str) -> None:
     payload = {
         "saved_at": datetime.now(timezone.utc).isoformat(),
+        "identity": identity,
         "tools": tools,
     }
     try:

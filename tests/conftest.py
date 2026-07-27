@@ -88,6 +88,8 @@ class MockState:
         # None | "cycle" (same cursor forever) | "endless" (fresh cursor forever)
         self.pagination_mode = None
         self._page_counter = 0
+        # if not None, tools/list returns exactly this as the JSON-RPC result
+        self.list_result_override = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -141,7 +143,9 @@ class _Handler(BaseHTTPRequestHandler):
             }
         elif method == "tools/list":
             result = {"tools": self.state.tools}
-            if self.state.pagination_mode == "cycle":
+            if self.state.list_result_override is not None:
+                result = self.state.list_result_override
+            elif self.state.pagination_mode == "cycle":
                 result = {"tools": [], "nextCursor": "same-cursor-forever"}
             elif self.state.pagination_mode == "endless":
                 self.state._page_counter += 1

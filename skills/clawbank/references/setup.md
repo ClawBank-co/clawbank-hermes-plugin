@@ -13,13 +13,19 @@ Everything runs against one base URL: `https://app.clawbank.co`.
 **In the app (humans):** Settings → API tokens at
 <https://app.clawbank.co/users/settings> (requires login).
 
-**Headless (agents), no browser needed** — three REST calls:
+**Headless (agents), no browser needed** — three REST calls. Exact payloads
+matter; codes expire quickly, so don't burn one guessing shapes:
 
-1. `POST /api/v1/auth/request_code` — sends a login code to an email address
-2. `POST /api/v1/auth/verify_code` — exchanges the code for a short-lived
-   bootstrap token
-3. `POST /api/v1/auth/bootstrap/api_tokens` — with the bootstrap token as
-   Bearer, returns the long-lived API token
+1. `POST /api/v1/auth/request_code`
+   Body: `{"email": "<email>"}`
+   → 200 with `status: code_sent`; a login code is emailed.
+2. `POST /api/v1/auth/verify_code`
+   Body: `{"email": "<email>", "code": "<code>"}` — **both fields are
+   required** (code alone returns 400 `invalid_request`)
+   → returns a short-lived bootstrap token.
+3. `POST /api/v1/auth/bootstrap/api_tokens`
+   Headers: `Authorization: Bearer <bootstrap token>`; empty JSON body
+   → returns the long-lived API token.
 
 Tokens are long-lived and revocable. There are **no scopes and no spending
 limits** — a token is full account access. Treat it like a bank password:
@@ -32,8 +38,9 @@ secrets manager.
 export CLAWBANK_API_TOKEN="<token>"
 ```
 
-`hermes plugins install` prompts for this automatically and saves it to
-`.env`. Optional overrides (matching the ClawBank CLI's conventions):
+`hermes plugins install` prompts for this automatically and saves it to the
+active Hermes profile's `$HERMES_HOME/.env` (default `~/.hermes/.env`).
+Optional overrides (matching the ClawBank CLI's conventions):
 
 | Variable | Purpose | Default |
 | --- | --- | --- |

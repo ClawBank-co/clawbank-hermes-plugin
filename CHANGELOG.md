@@ -11,11 +11,23 @@ live from the ClawBank API and change server-side without plugin releases.
 
 ### Security
 
-- `CLAWBANK_MCP_URL` must be HTTPS. Plain HTTP is allowed only for loopback
-  hosts (development/tests) or behind the explicit
-  `CLAWBANK_ALLOW_INSECURE_URL=1` development flag. A rejected URL degrades
-  to the `clawbank_setup` tool (reason `insecure_url`) — the token is never
-  sent to an unvalidated endpoint, and the Hermes launch never fails.
+- `CLAWBANK_MCP_URL` must be HTTPS (with a host). Plain HTTP is allowed only
+  for `localhost` or *literal* loopback IP addresses — parsed with
+  `ipaddress`, so DNS names dressed up as loopback (`127.evil.example`) are
+  rejected — or behind the explicit `CLAWBANK_ALLOW_INSECURE_URL=1`
+  development flag. A rejected URL degrades to the `clawbank_setup` tool
+  (reason `insecure_url`) — the token is never sent to an unvalidated
+  endpoint, and the Hermes launch never fails. A warning is logged whenever
+  a non-default endpoint is in use, since any override receives the token.
+- Catalogs are validated and bounded before registration: response bodies
+  are capped at 8 MiB, catalogs at 512 tools, cursors must be bounded
+  strings, malformed result shapes raise a clean startup error instead of
+  crashing, and individual descriptors are sanitized (name/description/
+  schema type-checked, duplicates dropped, server `annotations` preserved).
+- The catalog cache now expires after 7 days and is bound to the endpoint
+  plus a non-secret token fingerprint — a cache from another account,
+  endpoint, or rotated token is never served; cached tools are re-validated
+  on load.
 - HTTP redirects (3xx) are refused outright: the `Authorization` bearer
   header is never forwarded to a redirect target, closing a cross-origin
   token-leak path in Python's default `urllib` redirect handling.
@@ -40,5 +52,8 @@ live from the ClawBank API and change server-side without plugin releases.
   safety matrix, worked examples), registered as `clawbank:clawbank`.
 - JSON and SSE (`text/event-stream`) response handling, MCP session-id echo,
   and catalog pagination support — standard library only, zero dependencies.
-- Mock-endpoint test suite and CI (Python 3.10–3.13), plus a scheduled
-  live-surface drift check.
+- Mock-endpoint test suite and CI (Python 3.10–3.13 on Linux, macOS, and
+  Windows), plus a scheduled live-surface drift check.
+- Headless bootstrap payloads (`request_code`, `verify_code`,
+  `bootstrap/api_tokens`) documented with exact request bodies in the
+  `clawbank_setup` tool output and the setup reference.

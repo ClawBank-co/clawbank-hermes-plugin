@@ -107,7 +107,7 @@ A bundled skill (`skills/clawbank/`) teaches the agent judgment: when to quote i
 | --- | --- | --- |
 | `CLAWBANK_API_TOKEN` | API token (prompted at install) | — |
 | `CLAWBANK_TOKEN` | Token fallback, for parity with the ClawBank CLI | — |
-| `CLAWBANK_MCP_URL` | MCP endpoint override — must be `https://` (plain `http://` is allowed only for localhost) | `https://app.clawbank.co/mcp` |
+| `CLAWBANK_MCP_URL` | MCP endpoint override — must be `https://` (plain `http://` is allowed only for `localhost`/literal loopback IPs). **Any override receives your full-access token**; point it only at endpoints you control. A warning is logged when a non-default endpoint is in use. | `https://app.clawbank.co/mcp` |
 | `CLAWBANK_ALLOW_INSECURE_URL` | Development-only: set to `1` to allow a non-local `http://` endpoint. Never use with a real token. | unset |
 
 ## Safety model

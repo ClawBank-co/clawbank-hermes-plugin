@@ -30,6 +30,7 @@ from .client import (
     AuthError,
     ClawbankClient,
     ClawbankError,
+    catalog_cache_identity,
     load_cached_catalog,
     result_to_text,
     save_catalog,
@@ -89,11 +90,16 @@ def _make_setup_handler(reason: str):
                     "4. Restart Hermes — the full ClawBank tool catalog loads automatically.",
                 ],
                 "agent_bootstrap": (
-                    "Agents can mint a token without a browser: "
-                    "POST /api/v1/auth/request_code (emails a login code), "
-                    "POST /api/v1/auth/verify_code (returns a bootstrap token), "
-                    "POST /api/v1/auth/bootstrap/api_tokens (returns the long-lived API token). "
-                    "Base URL: https://app.clawbank.co"
+                    "Agents can mint a token without a browser (base URL "
+                    "https://app.clawbank.co): "
+                    '1) POST /api/v1/auth/request_code with JSON body {"email": "<email>"} '
+                    "— emails a login code (codes expire quickly). "
+                    '2) POST /api/v1/auth/verify_code with JSON body {"email": "<email>", '
+                    '"code": "<code>"} — BOTH fields are required; returns a short-lived '
+                    "bootstrap token. "
+                    "3) POST /api/v1/auth/bootstrap/api_tokens with header "
+                    "'Authorization: Bearer <bootstrap token>' and an empty JSON body — "
+                    "returns the long-lived API token."
                 ),
                 "docs": "https://app.clawbank.co/docs",
                 "security_note": (
@@ -163,19 +169,28 @@ def register(ctx) -> None:
         setup_reason = "insecure_url"
         logger.warning("ClawBank MCP URL rejected: %s", exc)
 
+    if client is not None and client.mcp_url != DEFAULT_MCP_URL:
+        logger.warning(
+            "ClawBank: using custom MCP endpoint %s — it will receive the "
+            "full-access API token; only point CLAWBANK_MCP_URL at endpoints "
+            "you control",
+            client.mcp_url,
+        )
+
     if client is None:
         pass
     elif not token:
         setup_reason = "no_token"
     else:
+        cache_identity = catalog_cache_identity(client.mcp_url, token)
         try:
             tools = client.tools_list()
-            save_catalog(_CATALOG_CACHE, tools)
+            save_catalog(_CATALOG_CACHE, tools, cache_identity)
         except AuthError as exc:
             setup_reason = "invalid_token"
             logger.warning("ClawBank API token rejected: %s", exc)
         except ClawbankError as exc:
-            tools = load_cached_catalog(_CATALOG_CACHE)
+            tools = load_cached_catalog(_CATALOG_CACHE, cache_identity)
             if tools:
                 logger.warning(
                     "ClawBank catalog fetch failed (%s); using cached catalog "

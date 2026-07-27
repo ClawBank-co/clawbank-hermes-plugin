@@ -63,11 +63,25 @@ class TestFallbacks:
 
     def test_offline_start_uses_cached_catalog(self, plugin, fake_ctx, client_mod, unreachable_url, tmp_path, monkeypatch):
         cache = tmp_path / "catalog.json"
-        client_mod.save_catalog(cache, SAMPLE_TOOLS)
+        identity = client_mod.catalog_cache_identity(unreachable_url, TEST_TOKEN)
+        client_mod.save_catalog(cache, SAMPLE_TOOLS, identity)
         _wire_env(monkeypatch, plugin, tmp_path, unreachable_url)
         plugin.register(fake_ctx)
 
         assert set(fake_ctx.tools) == {t["name"] for t in SAMPLE_TOOLS}
+
+    def test_offline_start_ignores_cache_from_other_token(self, plugin, fake_ctx, client_mod, unreachable_url, tmp_path, monkeypatch):
+        """A cache written under one token identity is never served to
+        another (account switch / token rotation)."""
+        cache = tmp_path / "catalog.json"
+        other = client_mod.catalog_cache_identity(unreachable_url, "someone-elses-token")
+        client_mod.save_catalog(cache, SAMPLE_TOOLS, other)
+        _wire_env(monkeypatch, plugin, tmp_path, unreachable_url)
+        plugin.register(fake_ctx)
+
+        assert set(fake_ctx.tools) == {"clawbank_setup"}
+        payload = json.loads(fake_ctx.tools["clawbank_setup"]["handler"]({}))
+        assert payload["reason"] == "unreachable"
 
     def test_offline_start_with_cold_cache_registers_setup(self, plugin, fake_ctx, unreachable_url, tmp_path, monkeypatch):
         _wire_env(monkeypatch, plugin, tmp_path, unreachable_url)
