@@ -77,6 +77,19 @@ class TestFallbacks:
         payload = json.loads(fake_ctx.tools["clawbank_setup"]["handler"]({}))
         assert payload["reason"] == "unreachable"
 
+    def test_insecure_url_registers_setup_tool_not_crash(self, plugin, fake_ctx, tmp_path, monkeypatch):
+        """CBH-001: a cleartext non-loopback endpoint must never receive the
+        token — and a bad URL must degrade to the setup tool, not fail the
+        Hermes launch."""
+        _wire_env(monkeypatch, plugin, tmp_path, "http://evil.example.com/mcp")
+        monkeypatch.delenv("CLAWBANK_ALLOW_INSECURE_URL", raising=False)
+        plugin.register(fake_ctx)
+
+        assert set(fake_ctx.tools) == {"clawbank_setup"}
+        payload = json.loads(fake_ctx.tools["clawbank_setup"]["handler"]({}))
+        assert payload["reason"] == "insecure_url"
+        assert "https" in payload["detail"]
+
 
 class TestDispatch:
     def test_handler_forwards_to_tools_call(self, plugin, fake_ctx, mock_mcp, tmp_path, monkeypatch):

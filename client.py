@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,11 @@ CLIENT_INFO = {"name": "clawbank-hermes-plugin", "version": PLUGIN_VERSION}
 
 _ACCEPT = "application/json, text/event-stream"
 
+# Catalog pagination guards: a well-behaved server returns the full catalog in
+# a handful of pages. These caps turn a malicious or broken server into a
+# clean startup error (which falls back to the cache) instead of a hang.
+MAX_CATALOG_PAGES = 50
+
 
 class ClawbankError(Exception):
     """Transport or protocol failure talking to the ClawBank MCP endpoint."""
@@ -39,6 +45,57 @@ class ClawbankError(Exception):
 
 class AuthError(ClawbankError):
     """The API token is missing, invalid, or revoked (HTTP 401/403)."""
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects.
+
+    Python's default redirect handler forwards the ``Authorization`` header to
+    the redirect target — including a *different origin* — which would leak
+    the full-access API token to whatever a 3xx points at. The endpoint never
+    legitimately redirects, so any 3xx is refused outright (surfaced as an
+    ``HTTPError`` by the default error handler and mapped to ``ClawbankError``
+    in ``_post``).
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirects())
+
+_LOOPBACK_HOSTS = {"localhost", "::1"}
+
+
+def validate_mcp_url(url: str) -> str:
+    """Enforce that the MCP endpoint cannot leak the bearer token in transit.
+
+    Rules:
+
+    * ``https://`` — always allowed.
+    * ``http://``  — allowed only for loopback hosts (local development and
+      tests), or when ``CLAWBANK_ALLOW_INSECURE_URL=1`` is explicitly set.
+      That flag is a development escape hatch; never use it with a real token.
+    * anything else — rejected.
+
+    Raises ``ClawbankError`` on rejection.
+    """
+    url = (url or "").strip()
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "https":
+        return url
+    if parts.scheme == "http":
+        host = (parts.hostname or "").lower()
+        if host in _LOOPBACK_HOSTS or host.startswith("127."):
+            return url
+        if os.environ.get("CLAWBANK_ALLOW_INSECURE_URL", "").strip() == "1":
+            return url
+        raise ClawbankError(
+            f"refusing insecure MCP URL {url!r}: the API token would be sent in "
+            "cleartext. Use an https:// endpoint, or set "
+            "CLAWBANK_ALLOW_INSECURE_URL=1 for development only."
+        )
+    raise ClawbankError(f"invalid MCP URL {url!r}: must be an https:// URL")
 
 
 def _parse_sse(body: str, want_id: Any) -> dict:
@@ -81,7 +138,9 @@ class ClawbankClient:
         token: str | None = None,
         timeout: float = 30.0,
     ) -> None:
-        self.mcp_url = (mcp_url or os.environ.get("CLAWBANK_MCP_URL") or DEFAULT_MCP_URL).strip()
+        self.mcp_url = validate_mcp_url(
+            mcp_url or os.environ.get("CLAWBANK_MCP_URL") or DEFAULT_MCP_URL
+        )
         self.token = token
         self.timeout = timeout
         self._session_id: str | None = None
@@ -108,7 +167,7 @@ class ClawbankClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _OPENER.open(request, timeout=self.timeout) as response:
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
                     self._session_id = session_id
@@ -116,6 +175,13 @@ class ClawbankClient:
                 content_type = response.headers.get("Content-Type", "")
                 return body, content_type
         except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                location = (exc.headers.get("Location", "") if exc.headers else "").strip()
+                raise ClawbankError(
+                    f"refusing HTTP {exc.code} redirect from {self.mcp_url}"
+                    + (f" to {location}" if location else "")
+                    + " — credentials are never forwarded across redirects"
+                ) from exc
             body = exc.read().decode("utf-8", errors="replace")
             if exc.code in (401, 403):
                 raise AuthError(_error_detail(body) or f"HTTP {exc.code}") from exc
@@ -183,18 +249,29 @@ class ClawbankClient:
         self._initialized = True
 
     def tools_list(self) -> list:
-        """Fetch the full per-account tool catalog (follows pagination)."""
+        """Fetch the full per-account tool catalog (follows pagination).
+
+        Bounded: a repeated cursor or more than ``MAX_CATALOG_PAGES`` pages is
+        treated as a broken/hostile server and raises ``ClawbankError`` (the
+        caller then falls back to the cached catalog or the setup tool).
+        """
         self.initialize()
         tools: list = []
         cursor = None
-        while True:
+        seen_cursors: set = set()
+        for _ in range(MAX_CATALOG_PAGES):
             params = {"cursor": cursor} if cursor else {}
             result = self._rpc("tools/list", params) or {}
             tools.extend(result.get("tools") or [])
             cursor = result.get("nextCursor")
             if not cursor:
-                break
-        return tools
+                return tools
+            if cursor in seen_cursors:
+                raise ClawbankError("tools/list pagination cursor cycle detected")
+            seen_cursors.add(cursor)
+        raise ClawbankError(
+            f"tools/list did not terminate within {MAX_CATALOG_PAGES} pages"
+        )
 
     def tools_call(self, name: str, arguments: dict | None = None) -> dict:
         """Forward one tool invocation. Returns the raw MCP tool result."""

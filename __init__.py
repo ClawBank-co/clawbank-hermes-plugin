@@ -64,6 +64,12 @@ _SETUP_REASONS = {
     "no_token": "No CLAWBANK_API_TOKEN is set in the environment.",
     "invalid_token": "The configured ClawBank API token was rejected (revoked or mistyped).",
     "unreachable": "The ClawBank API was unreachable at startup and no cached catalog exists yet.",
+    "insecure_url": (
+        "The configured CLAWBANK_MCP_URL was rejected: it must be an https:// "
+        "endpoint (plain http:// is allowed only for localhost, or with "
+        "CLAWBANK_ALLOW_INSECURE_URL=1 in development). Unset the override to "
+        "use the default endpoint."
+    ),
 }
 
 
@@ -145,11 +151,21 @@ def _short_description(text: str, limit: int = 140) -> str:
 def register(ctx) -> None:
     token = (os.environ.get("CLAWBANK_API_TOKEN") or os.environ.get("CLAWBANK_TOKEN") or "").strip()
     mcp_url = os.environ.get("CLAWBANK_MCP_URL", DEFAULT_MCP_URL)
-    client = ClawbankClient(mcp_url=mcp_url, token=token or None)
 
     tools: list = []
     setup_reason = ""
-    if not token:
+    client = None
+    try:
+        client = ClawbankClient(mcp_url=mcp_url, token=token or None)
+    except ClawbankError as exc:
+        # URL failed validation (non-HTTPS, non-loopback). Never fail the
+        # launch — degrade to the setup tool, which explains the rejection.
+        setup_reason = "insecure_url"
+        logger.warning("ClawBank MCP URL rejected: %s", exc)
+
+    if client is None:
+        pass
+    elif not token:
         setup_reason = "no_token"
     else:
         try:

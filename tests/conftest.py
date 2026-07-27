@@ -83,6 +83,11 @@ class MockState:
         self.call_result = {
             "content": [{"type": "text", "text": json.dumps({"balance_usdc": "12.34"})}]
         }
+        self.requests = []  # every request: {method, path, authorization}
+        self.redirect_to = None  # if set, answer every POST with a 302 there
+        # None | "cycle" (same cursor forever) | "endless" (fresh cursor forever)
+        self.pagination_mode = None
+        self._page_counter = 0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -91,10 +96,28 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # keep test output clean
         pass
 
+    def _record(self):
+        self.state.requests.append(
+            {
+                "method": self.command,
+                "path": self.path,
+                "authorization": self.headers.get("Authorization"),
+            }
+        )
+
     def do_GET(self):
+        self._record()
         self._send_json(200, {"service": "clawbank-mcp", "transport": "streamable-http"})
 
     def do_POST(self):
+        self._record()
+        if self.state.redirect_to:
+            self.send_response(302)
+            self.send_header("Location", self.state.redirect_to)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         auth = self.headers.get("Authorization", "")
         if auth != f"Bearer {self.state.required_token}":
             self._send_json(401, {"error": "missing or invalid API token"})
@@ -118,6 +141,11 @@ class _Handler(BaseHTTPRequestHandler):
             }
         elif method == "tools/list":
             result = {"tools": self.state.tools}
+            if self.state.pagination_mode == "cycle":
+                result = {"tools": [], "nextCursor": "same-cursor-forever"}
+            elif self.state.pagination_mode == "endless":
+                self.state._page_counter += 1
+                result = {"tools": [], "nextCursor": f"page-{self.state._page_counter}"}
         elif method == "tools/call":
             params = message.get("params") or {}
             self.state.calls.append(params)

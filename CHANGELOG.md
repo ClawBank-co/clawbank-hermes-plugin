@@ -9,6 +9,24 @@ live from the ClawBank API and change server-side without plugin releases.
 
 ## [0.1.0] — 2026-07-26
 
+### Security
+
+- `CLAWBANK_MCP_URL` must be HTTPS. Plain HTTP is allowed only for loopback
+  hosts (development/tests) or behind the explicit
+  `CLAWBANK_ALLOW_INSECURE_URL=1` development flag. A rejected URL degrades
+  to the `clawbank_setup` tool (reason `insecure_url`) — the token is never
+  sent to an unvalidated endpoint, and the Hermes launch never fails.
+- HTTP redirects (3xx) are refused outright: the `Authorization` bearer
+  header is never forwarded to a redirect target, closing a cross-origin
+  token-leak path in Python's default `urllib` redirect handling.
+- Catalog pagination is bounded: a repeated `nextCursor` or more than 50
+  pages aborts the fetch (falling back to the cached catalog) instead of
+  looping forever against a broken or hostile server.
+- The bundled skill is now self-contained: the confirmation contract, the
+  per-area confirmation matrix, failure patterns, and known limits are
+  inlined in `SKILL.md` so they load through `skill_view` even where Hermes
+  does not serve a skill's supporting files.
+
 ### Added
 
 - Dynamic catalog proxy: fetches `tools/list` from the ClawBank MCP endpoint

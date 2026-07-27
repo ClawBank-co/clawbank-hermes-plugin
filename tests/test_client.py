@@ -1,11 +1,12 @@
-"""Transport tests: JSON/SSE parsing, auth, pagination-safe catalog, cache."""
+"""Transport tests: JSON/SSE parsing, auth, pagination-safe catalog, cache,
+URL validation, and redirect refusal."""
 
 from __future__ import annotations
 
 import json
 
 import pytest
-from conftest import SAMPLE_TOOLS, TEST_TOKEN
+from conftest import SAMPLE_TOOLS, TEST_TOKEN, MockMCP
 
 
 def _client(client_mod, url, token=TEST_TOKEN):
@@ -35,6 +36,71 @@ class TestToolsList:
     def test_unreachable_raises_clawbank_error(self, client_mod, unreachable_url):
         client = _client(client_mod, unreachable_url)
         with pytest.raises(client_mod.ClawbankError):
+            client.tools_list()
+
+    def test_pagination_cursor_cycle_raises(self, client_mod, mock_mcp):
+        mock_mcp.state.pagination_mode = "cycle"
+        with pytest.raises(client_mod.ClawbankError, match="cursor cycle"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+    def test_pagination_page_cap_raises(self, client_mod, mock_mcp):
+        mock_mcp.state.pagination_mode = "endless"
+        with pytest.raises(client_mod.ClawbankError, match="did not terminate"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+
+class TestUrlValidation:
+    """CBH-001: the endpoint must never be able to receive the token over
+    cleartext HTTP (loopback excepted for development and tests)."""
+
+    def test_https_allowed(self, client_mod):
+        client = client_mod.ClawbankClient(mcp_url="https://app.clawbank.co/mcp")
+        assert client.mcp_url == "https://app.clawbank.co/mcp"
+
+    def test_http_loopback_allowed(self, client_mod):
+        for host in ("localhost", "127.0.0.1", "127.9.9.9"):
+            client_mod.ClawbankClient(mcp_url=f"http://{host}:8080/mcp")
+
+    def test_http_public_host_rejected(self, client_mod, monkeypatch):
+        monkeypatch.delenv("CLAWBANK_ALLOW_INSECURE_URL", raising=False)
+        with pytest.raises(client_mod.ClawbankError, match="insecure"):
+            client_mod.ClawbankClient(mcp_url="http://evil.example.com/mcp")
+
+    def test_non_http_scheme_rejected(self, client_mod):
+        for url in ("ftp://app.clawbank.co/mcp", "file:///etc/passwd", "not a url"):
+            with pytest.raises(client_mod.ClawbankError):
+                client_mod.ClawbankClient(mcp_url=url)
+
+    def test_insecure_flag_allows_http_for_development(self, client_mod, monkeypatch):
+        monkeypatch.setenv("CLAWBANK_ALLOW_INSECURE_URL", "1")
+        client_mod.ClawbankClient(mcp_url="http://dev-box.internal/mcp")
+
+    def test_default_url_used_when_env_unset(self, client_mod, monkeypatch):
+        monkeypatch.delenv("CLAWBANK_MCP_URL", raising=False)
+        client = client_mod.ClawbankClient()
+        assert client.mcp_url == client_mod.DEFAULT_MCP_URL
+
+
+class TestRedirectRefusal:
+    """CBH-001: redirects are refused outright — the Authorization header must
+    never reach a redirect target (covers cross-origin 302 and, because *all*
+    redirects are refused, HTTPS→HTTP downgrade as well)."""
+
+    def test_redirect_raises_and_token_never_reaches_destination(self, client_mod, mock_mcp):
+        destination = MockMCP()
+        try:
+            mock_mcp.state.redirect_to = destination.url
+            client = _client(client_mod, mock_mcp.url)
+            with pytest.raises(client_mod.ClawbankError, match="redirect"):
+                client.tools_list()
+            assert destination.state.requests == []
+        finally:
+            destination.shutdown()
+
+    def test_redirect_error_names_the_destination(self, client_mod, mock_mcp):
+        mock_mcp.state.redirect_to = "http://attacker.example.com/steal"
+        client = _client(client_mod, mock_mcp.url)
+        with pytest.raises(client_mod.ClawbankError, match="attacker.example.com"):
             client.tools_list()
 
 
