@@ -80,6 +80,43 @@ class TestCatalogValidation:
         with pytest.raises(client_mod.ClawbankError, match="exceeded"):
             _client(client_mod, mock_mcp.url).tools_list()
 
+    def test_aggregate_catalog_metadata_is_bounded(
+        self, client_mod, mock_mcp, monkeypatch
+    ):
+        monkeypatch.setattr(client_mod, "MAX_CATALOG_BYTES", 256)
+        mock_mcp.state.list_result_override = {
+            "tools": [
+                {
+                    "name": "large_schema",
+                    "inputSchema": {
+                        "type": "object",
+                        "description": "x" * 512,
+                    },
+                }
+            ]
+        }
+        with pytest.raises(client_mod.ClawbankError, match="catalog metadata exceeded"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
+    def test_aggregate_bound_applies_across_pages(
+        self, client_mod, mock_mcp, monkeypatch
+    ):
+        pages = [
+            [{"name": "page_one", "description": "x" * 180}],
+            [{"name": "page_two", "description": "y" * 180}],
+        ]
+        page_sizes = [
+            len(json.dumps(page, separators=(",", ":")).encode("utf-8"))
+            for page in pages
+        ]
+        limit = max(page_sizes) + 1
+        assert sum(page_sizes) > limit
+        monkeypatch.setattr(client_mod, "MAX_CATALOG_BYTES", limit)
+        mock_mcp.state.list_pages = pages
+
+        with pytest.raises(client_mod.ClawbankError, match="catalog metadata exceeded"):
+            _client(client_mod, mock_mcp.url).tools_list()
+
     def test_malformed_descriptors_dropped_and_duplicates_deduped(self, client_mod):
         raw = [
             {"name": "good", "description": "ok", "inputSchema": {"type": "object"}},
@@ -104,6 +141,12 @@ class TestCatalogValidation:
     def test_sanitize_rejects_non_list(self, client_mod):
         with pytest.raises(client_mod.ClawbankError):
             client_mod.sanitize_tools({"tools": []})
+
+    def test_sanitize_rejects_oversized_metadata(self, client_mod, monkeypatch):
+        monkeypatch.setattr(client_mod, "MAX_CATALOG_BYTES", 128)
+        raw = [{"name": "large", "description": "x" * 256}]
+        with pytest.raises(client_mod.ClawbankError, match="catalog metadata exceeded"):
+            client_mod.sanitize_tools(raw)
 
 
 class TestUrlValidation:
@@ -304,6 +347,19 @@ class TestCatalogCache:
     def test_corrupt_file_returns_empty(self, client_mod, tmp_path):
         path = tmp_path / "catalog.json"
         path.write_text("{not json")
+        assert client_mod.load_cached_catalog(path, self.IDENTITY) == []
+
+    def test_oversized_cache_is_rejected_before_read(
+        self, client_mod, tmp_path, monkeypatch
+    ):
+        path = tmp_path / "catalog.json"
+        path.write_text("x" * 129)
+        monkeypatch.setattr(client_mod, "MAX_CACHE_FILE_BYTES", 128)
+
+        def unexpected_read(*args, **kwargs):
+            pytest.fail("oversized cache should not be read into memory")
+
+        monkeypatch.setattr(client_mod.Path, "read_text", unexpected_read)
         assert client_mod.load_cached_catalog(path, self.IDENTITY) == []
 
     def test_identity_binds_endpoint_and_token_without_leaking_it(self, client_mod):

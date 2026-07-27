@@ -9,7 +9,7 @@ description: >
 author: ClawBank (justice@clawbank.co)
 requires_env:
   - name: CLAWBANK_API_TOKEN
-    description: "ClawBank API token — free account, mint under Settings → API tokens"
+    description: "Scoped ClawBank API token — recommended default: read+send, $10/day cap"
     url: "https://app.clawbank.co/users/settings"
     secret: true
 # Tools are discovered dynamically from the live per-account catalog at load

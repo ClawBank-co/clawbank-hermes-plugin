@@ -98,13 +98,24 @@ def _make_setup_handler(reason: str):
                     '"code": "<code>"} — BOTH fields are required; returns a short-lived '
                     "bootstrap token. "
                     "3) POST /api/v1/auth/bootstrap/api_tokens with header "
-                    "'Authorization: Bearer <bootstrap token>' and an empty JSON body — "
-                    "returns the long-lived API token."
+                    "'Authorization: Bearer *** token>' and JSON body "
+                    "{'name': 'hermes-default', 'scopes': ['read', 'send'], "
+                    "'daily_cap_usd': '10'} — returns a bounded long-lived API token. "
+                    "Omitting scopes intentionally creates a full-access token including "
+                    "raw transaction signing; the plugin does not use that as its silent "
+                    "default."
                 ),
+                "recommended_token": {
+                    "name": "hermes-default",
+                    "scopes": ["read", "send"],
+                    "daily_cap_usd": "10",
+                },
                 "docs": "https://app.clawbank.co/docs",
                 "security_note": (
-                    "The token grants full account access. Never display, echo, or "
-                    "log its value."
+                    "The recommended default is scoped and capped. Omitting scopes "
+                    "intentionally creates a full-access token including raw signing; "
+                    "that can be appropriate for deliberate fresh-account exploration, "
+                    "but should not happen silently. Never display, echo, or log a token."
                 ),
             }
         )
@@ -112,13 +123,49 @@ def _make_setup_handler(reason: str):
     return clawbank_setup
 
 
-def _make_handler(client: ClawbankClient, tool_name: str):
+def _is_destructive(tool: dict) -> bool:
+    """Fail closed unless MCP annotations explicitly classify a tool read-only."""
+    annotations = tool.get("annotations")
+    return not (
+        isinstance(annotations, dict)
+        and annotations.get("readOnlyHint") is True
+        and annotations.get("destructiveHint") is False
+    )
+
+
+def _make_handler(
+    client: ClawbankClient,
+    tool_name: str,
+    *,
+    destructive: bool = False,
+    allow_destructive: bool = False,
+    cached_catalog: bool = False,
+):
     """One generic handler per tool: serialize args → tools/call → text.
 
     Per Hermes handler rules: always return a JSON-safe string, never raise.
     """
 
     def handler(args: dict, **kwargs) -> str:
+        if destructive and not allow_destructive:
+            reason = (
+                "This tool came from a cached catalog, whose annotations cannot "
+                "authorize execution while ClawBank is unreachable."
+                if cached_catalog
+                else "This tool was not explicitly classified read-only by the server."
+            )
+            return json.dumps(
+                {
+                    "error": "destructive_tool_blocked",
+                    "tool": tool_name,
+                    "hint": (
+                        f"{reason} It is disabled by default. Use a scoped, "
+                        "spend-capped token and set "
+                        "CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS=1 before starting Hermes "
+                        "only when destructive operations are intentionally required."
+                    ),
+                }
+            )
         try:
             result = client.tools_call(tool_name, args or {})
             return result_to_text(result)
@@ -157,8 +204,12 @@ def _short_description(text: str, limit: int = 140) -> str:
 def register(ctx) -> None:
     token = (os.environ.get("CLAWBANK_API_TOKEN") or os.environ.get("CLAWBANK_TOKEN") or "").strip()
     mcp_url = os.environ.get("CLAWBANK_MCP_URL", DEFAULT_MCP_URL)
+    allow_destructive = (
+        os.environ.get("CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS", "").strip() == "1"
+    )
 
     tools: list = []
+    catalog_from_cache = False
     setup_reason = ""
     client = None
     try:
@@ -172,7 +223,7 @@ def register(ctx) -> None:
     if client is not None and client.mcp_url != DEFAULT_MCP_URL:
         logger.warning(
             "ClawBank: using custom MCP endpoint %s — it will receive the "
-            "full-access API token; only point CLAWBANK_MCP_URL at endpoints "
+            "API token; only point CLAWBANK_MCP_URL at endpoints "
             "you control",
             client.mcp_url,
         )
@@ -192,6 +243,7 @@ def register(ctx) -> None:
         except ClawbankError as exc:
             tools = load_cached_catalog(_CATALOG_CACHE, cache_identity)
             if tools:
+                catalog_from_cache = True
                 logger.warning(
                     "ClawBank catalog fetch failed (%s); using cached catalog "
                     "with %d tools", exc, len(tools),
@@ -210,6 +262,7 @@ def register(ctx) -> None:
             emoji=EMOJI,
         )
     else:
+        assert client is not None
         for tool in tools:
             name = tool.get("name")
             if not name:
@@ -218,7 +271,13 @@ def register(ctx) -> None:
                 name=name,
                 toolset=TOOLSET,
                 schema=_to_hermes_schema(tool),
-                handler=_make_handler(client, name),
+                handler=_make_handler(
+                    client,
+                    name,
+                    destructive=catalog_from_cache or _is_destructive(tool),
+                    cached_catalog=catalog_from_cache,
+                    allow_destructive=allow_destructive,
+                ),
                 description=_short_description(tool.get("description", "")),
                 emoji=EMOJI,
             )

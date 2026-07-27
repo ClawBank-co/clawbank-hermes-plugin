@@ -21,6 +21,11 @@ SAMPLE_TOOLS = [
         "name": "get_balance",
         "description": "Primary dashboard wallet USDC balance",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+        },
     },
     {
         "name": "send_usdc_on_base",
@@ -35,6 +40,11 @@ SAMPLE_TOOLS = [
                 "amount": {"type": "string"},
             },
             "required": ["to_address", "amount"],
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
         },
     },
 ]
@@ -90,6 +100,8 @@ class MockState:
         self._page_counter = 0
         # if not None, tools/list returns exactly this as the JSON-RPC result
         self.list_result_override = None
+        # if not None, tools/list returns these pages in order with cursors
+        self.list_pages = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -142,9 +154,15 @@ class _Handler(BaseHTTPRequestHandler):
                 "serverInfo": {"name": "mock-clawbank", "version": "0"},
             }
         elif method == "tools/list":
-            result = {"tools": self.state.tools}
+            result: dict = {"tools": self.state.tools}
             if self.state.list_result_override is not None:
                 result = self.state.list_result_override
+            elif self.state.list_pages is not None:
+                index = self.state._page_counter
+                self.state._page_counter += 1
+                result = {"tools": self.state.list_pages[index]}
+                if self.state._page_counter < len(self.state.list_pages):
+                    result["nextCursor"] = f"page-{self.state._page_counter}"
             elif self.state.pagination_mode == "cycle":
                 result = {"tools": [], "nextCursor": "same-cursor-forever"}
             elif self.state.pagination_mode == "endless":

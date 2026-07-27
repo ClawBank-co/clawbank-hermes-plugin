@@ -24,13 +24,24 @@ matter; codes expire quickly, so don't burn one guessing shapes:
    required** (code alone returns 400 `invalid_request`)
    → returns a short-lived bootstrap token.
 3. `POST /api/v1/auth/bootstrap/api_tokens`
-   Headers: `Authorization: Bearer <bootstrap token>`; empty JSON body
-   → returns the long-lived API token.
+   Headers: `Authorization: Bearer *** token>`
+   Recommended body for a normal Hermes install:
+   `{"name": "hermes-default", "scopes": ["read", "send"], "daily_cap_usd": "10"}`
+   → returns a long-lived API token limited to read/send and $10 per day.
 
-Tokens are long-lived and revocable. There are **no scopes and no spending
-limits** — a token is full account access. Treat it like a bank password:
-never display, echo, or log it, and store it only in the environment or a
+Available scopes are `read`, `trade`, `send`, `admin`, and `raw_sign`.
+`per_tx_cap_usd` and `daily_cap_usd` are optional decimal-string spending
+caps enforced server-side. Use the narrowest scopes and lowest caps needed.
+Omitting `scopes` intentionally creates a full-access token that includes raw
+transaction signing; the plugin does not use that as its silent default.
+Unscoped keys remain appropriate for deliberate fresh-account exploration.
+Tokens are long-lived, independently revocable, and additional
+purpose-specific keys can be minted by repeating the email bootstrap flow.
+Never display, echo, or log a token; store it only in the environment or a
 secrets manager.
+
+The complete request/response contract and curl examples are maintained at
+<https://app.clawbank.co/docs>.
 
 ## 3. Configure the plugin
 
@@ -47,11 +58,13 @@ Optional overrides (matching the ClawBank CLI's conventions):
 | `CLAWBANK_API_TOKEN` | API token (primary) | — |
 | `CLAWBANK_TOKEN` | API token (fallback, CLI compatibility) | — |
 | `CLAWBANK_MCP_URL` | MCP endpoint override | `https://app.clawbank.co/mcp` |
+| `CLAWBANK_ALLOW_DESTRUCTIVE_TOOLS` | Set to `1` to enable tools carrying MCP `destructiveHint: true`; keep unset for read-only operation | unset |
 
 ## 4. Verify
 
 Restart Hermes. The banner's tool list should show the `clawbank` toolset
-with the full catalog. A quick smoke test: *"Show me my ClawBank balances."*
+with the scope-aware catalog for that token. A quick smoke test: *"Show me my
+ClawBank balances."* A read-only token registers no fund-moving tools.
 
 If only `clawbank_setup` appears, the token is missing or was rejected —
 re-mint at Settings → API tokens and restart.
